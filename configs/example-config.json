@@ -1,0 +1,29 @@
+{
+  "version": "1.0",
+  "cloud": "azure",
+  "archetype": "lakehouse",
+  "components": [
+    { "id": "azure-databricks", "tier": "premium", "config": { "sku": "premium", "workers": 4 } },
+    { "id": "azure-adls-gen2", "config": { "replication": "LRS", "tier": "hot" } },
+    { "id": "azure-data-factory", "config": { "selfHostedIR": true } },
+    { "id": "azure-key-vault", "config": { "sku": "standard" } },
+    { "id": "azure-purview", "config": {} },
+    { "id": "azure-vnet", "config": { "addressSpace": "10.0.0.0/16" } },
+    { "id": "azure-private-endpoints", "config": { "services": ["databricks", "adls", "key-vault"] } }
+  ],
+  "networking": {
+    "private": true,
+    "vpnGateway": false,
+    "expressRoute": false,
+    "nsgRules": "default"
+  },
+  "environment": "dev",
+  "tags": {
+    "project": "data-platform",
+    "environment": "dev",
+    "owner": "data-team",
+    "costCenter": "CC-1234"
+  },
+  "estimatedMonthlyCost": 2340,
+  "createdAt": "2025-01-15T10:30:00Z"
+}

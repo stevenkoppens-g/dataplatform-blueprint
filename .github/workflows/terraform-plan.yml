@@ -1,0 +1,232 @@
+name: Terraform Plan
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  TERRAFORM_VERSION: ${{ vars.TERRAFORM_VERSION || '1.7.0' }}
+  # Azure credentials
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  # AWS credentials
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  # GCP credentials
+  GOOGLE_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+  GOOGLE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+
+jobs:
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: true
+
+      - name: Detect cloud providers
+        id: detect
+        run: |
+          providers=""
+
+          if [ -d "terraform/environments/azure" ] || [ -d "terraform/modules/azure" ]; then
+            providers="${providers}azure,"
+            echo "azure=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "azure=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ -d "terraform/environments/aws" ] || [ -d "terraform/modules/aws" ]; then
+            providers="${providers}aws,"
+            echo "aws=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "aws=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ -d "terraform/environments/gcp" ] || [ -d "terraform/modules/gcp" ]; then
+            providers="${providers}gcp,"
+            echo "gcp=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "gcp=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Detected providers: ${providers}"
+          echo "providers=${providers}" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform Init - Azure
+        if: steps.detect.outputs.azure == 'true'
+        working-directory: terraform
+        run: terraform init -input=false
+        id: init-azure
+
+      - name: Terraform Validate - Azure
+        if: steps.detect.outputs.azure == 'true'
+        working-directory: terraform
+        run: terraform validate
+        id: validate-azure
+
+      - name: Terraform Plan - Azure
+        if: steps.detect.outputs.azure == 'true'
+        working-directory: terraform
+        id: plan-azure
+        run: terraform plan -no-color -input=false
+        continue-on-error: true
+
+      - name: Terraform Init - AWS
+        if: steps.detect.outputs.aws == 'true'
+        working-directory: terraform
+        run: terraform init -input=false
+        id: init-aws
+
+      - name: Terraform Validate - AWS
+        if: steps.detect.outputs.aws == 'true'
+        working-directory: terraform
+        run: terraform validate
+        id: validate-aws
+
+      - name: Terraform Plan - AWS
+        if: steps.detect.outputs.aws == 'true'
+        working-directory: terraform
+        id: plan-aws
+        run: terraform plan -no-color -input=false
+        continue-on-error: true
+
+      - name: Terraform Init - GCP
+        if: steps.detect.outputs.gcp == 'true'
+        working-directory: terraform
+        run: terraform init -input=false
+        id: init-gcp
+
+      - name: Terraform Validate - GCP
+        if: steps.detect.outputs.gcp == 'true'
+        working-directory: terraform
+        run: terraform validate
+        id: validate-gcp
+
+      - name: Terraform Plan - GCP
+        if: steps.detect.outputs.gcp == 'true'
+        working-directory: terraform
+        id: plan-gcp
+        run: terraform plan -no-color -input=false
+        continue-on-error: true
+
+      - name: Post Plan to PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const providers = '${{ steps.detect.outputs.providers }}'.split(',').filter(Boolean);
+            let body = '## Terraform Plan Results\n\n';
+
+            const plans = {
+              azure: {
+                init: '${{ steps.init-azure.outcome }}',
+                validate: '${{ steps.validate-azure.outcome }}',
+                plan: `${{ steps.plan-azure.outputs.stdout }}`,
+                planOutcome: '${{ steps.plan-azure.outcome }}'
+              },
+              aws: {
+                init: '${{ steps.init-aws.outcome }}',
+                validate: '${{ steps.validate-aws.outcome }}',
+                plan: `${{ steps.plan-aws.outputs.stdout }}`,
+                planOutcome: '${{ steps.plan-aws.outcome }}'
+              },
+              gcp: {
+                init: '${{ steps.init-gcp.outcome }}',
+                validate: '${{ steps.validate-gcp.outcome }}',
+                plan: `${{ steps.plan-gcp.outputs.stdout }}`,
+                planOutcome: '${{ steps.plan-gcp.outcome }}'
+              }
+            };
+
+            for (const provider of providers) {
+              const data = plans[provider];
+              if (!data) continue;
+
+              const icon = data.planOutcome === 'success' ? ':white_check_mark:' : ':x:';
+              body += `### ${icon} ${provider.toUpperCase()}\n\n`;
+              body += `| Step | Status |\n|------|--------|\n`;
+              body += `| Init | \`${data.init}\` |\n`;
+              body += `| Validate | \`${data.validate}\` |\n`;
+              body += `| Plan | \`${data.planOutcome}\` |\n\n`;
+
+              if (data.plan) {
+                const planOutput = data.plan.length > 60000
+                  ? data.plan.substring(0, 60000) + '\n\n... (truncated)'
+                  : data.plan;
+
+                body += `<details><summary>Show Plan Output</summary>\n\n\`\`\`terraform\n${planOutput}\n\`\`\`\n\n</details>\n\n`;
+              }
+            }
+
+            if (providers.length === 0) {
+              body += ':warning: No cloud provider configurations were detected.\n';
+            }
+
+            body += `\n---\n*Triggered by @${{ github.actor }} via commit \`${{ github.sha }}\`*`;
+
+            // Find existing bot comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' && comment.body.includes('## Terraform Plan Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+            }
+
+      - name: Check plan outcomes
+        run: |
+          azure_outcome="${{ steps.plan-azure.outcome }}"
+          aws_outcome="${{ steps.plan-aws.outcome }}"
+          gcp_outcome="${{ steps.plan-gcp.outcome }}"
+
+          failed=false
+          if [ "${{ steps.detect.outputs.azure }}" == "true" ] && [ "$azure_outcome" == "failure" ]; then
+            echo "::error::Azure Terraform plan failed"
+            failed=true
+          fi
+          if [ "${{ steps.detect.outputs.aws }}" == "true" ] && [ "$aws_outcome" == "failure" ]; then
+            echo "::error::AWS Terraform plan failed"
+            failed=true
+          fi
+          if [ "${{ steps.detect.outputs.gcp }}" == "true" ] && [ "$gcp_outcome" == "failure" ]; then
+            echo "::error::GCP Terraform plan failed"
+            failed=true
+          fi
+
+          if [ "$failed" == "true" ]; then
+            exit 1
+          fi
